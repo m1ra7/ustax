@@ -1,0 +1,2 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {passwordHash,verifyPassword} from '../lib/password';
+test('passwords have unique salts and incorrect or missing credentials fail',async()=>{const password='independent-installation-test';const a=await passwordHash(password),b=await passwordHash(password);assert.notEqual(a,b);assert(!a.includes(password));assert(await verifyPassword(password,a));assert(!await verifyPassword('wrong',a));assert(!await verifyPassword(password,undefined));});

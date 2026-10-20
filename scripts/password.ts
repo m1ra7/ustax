@@ -1,0 +1,5 @@
+import {db} from '../lib/db';import {users,credentials,tokens,audit} from '../db/schema';import {eq} from 'drizzle-orm';import {passwordHash} from '../lib/password';
+const email=process.env.STAFF_EMAIL?.toLowerCase(),password=process.env.STAFF_PASSWORD;
+if(!email||!password||password.length<12||password.length>200)throw new Error('STAFF_EMAIL ve en az 12, en fazla 200 karakter STAFF_PASSWORD gerekli.');
+const u=(await db().select().from(users).where(eq(users.email,email)))[0];if(!u)throw new Error('Çalışan bulunamadı. Önce ekip ekranından ekleyin.');
+const value=await passwordHash(password);await db().batch([db().insert(credentials).values({staffId:u.id,passwordHash:value}).onConflictDoUpdate({target:credentials.staffId,set:{passwordHash:value}}),db().delete(tokens).where(eq(tokens.staffId,u.id)),db().insert(audit).values({id:crypto.randomUUID(),actorId:'password-cli',action:'staff.password_changed',targetId:u.id})]);console.log('Parola güncellendi; önceki oturumlar ve API anahtarları iptal edildi.');

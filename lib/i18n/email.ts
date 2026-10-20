@@ -1,0 +1,2 @@
+import {translate,type Language} from './core';
+export function verificationEmail(language:Language,number:string,version:number,code:string){return {subject:translate(language,'UstaX — Teklif doğrulama kodunuz'),text:[number+' / '+translate(language,'Teklif v{version}',{version}),translate(language,'Doğrulama kodunuz: {code}',{code}),translate(language,'Kod 10 dakika geçerlidir. Kodunuzu yalnızca UstaX takip sayfasında girin.')].join('\n')};}
