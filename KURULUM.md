@@ -66,7 +66,7 @@ pnpm dev
 
 `http://localhost:3000/yonetim/giris` adresini açın. Oluşturduğunuz e-posta ve parolayla giriş yapın. Müşteriler `/takip/<gizli-anahtar>` sayfasını üyelik açmadan kullanır. Takip bağlantısı oluşturulduğunda kopyalayın; veritabanında yalnızca hash tutulduğu için eski bağlantının kendisi geri okunamaz. Yönetici gerektiğinde bağlantıyı yenileyebilir.
 
-Yeni teknisyeni Ekip ve yetkiler ekranında oluşturun. Sonra o çalışan için `scripts/password.ts` komutuyla parola tanımlayın. Parola unutulduğunda aynı komut kullanılabilir. Kamuya açık kayıt veya parola sıfırlama uç noktası yoktur.
+Yeni teknisyeni Ekip ve yetkiler ekranında en az 12 karakterlik başlangıç parolasıyla oluşturun. Mevcut çalışanın parolasını kartındaki Parola belirle alanından yenileyebilirsiniz. Parola, rol veya erişim değişikliğinde ilgili çalışanın eski oturumları iptal edilir. `scripts/password.ts` komutu acil durum terminal yöntemi olarak kullanılabilir. Kamuya açık kayıt veya parola sıfırlama uç noktası yoktur.
 
 ## 3. Kendi sunucunuzda yayınlama
 
@@ -104,3 +104,13 @@ pnpm typecheck
 Yalnızca ayrı geliştirme veritabanında örnek kayıt oluşturmak için `.env.local` dosyasında `ALLOW_DEVELOPMENT_SEED=yes` tanımlayın ve `node --env-file=.env.local --import tsx scripts/seed.ts` çalıştırın. Canlı müşteri veritabanında seed çalıştırmayın.
 
 `docs/API.md` uç noktaları açıklar. Gelecekteki SwiftUI istemcisi aynı `/api/v1` API'sini yönetici tarafından verilen süreli Bearer anahtarıyla kullanabilir. API anahtarlarını Keychain'de saklayın.
+
+## Eski kayıtların takip bağlantısı ve QR kodu
+
+Güvenli anahtarın kendisi veritabanında saklanmaz. Sayfa yenilendiğinde önceki bağlantı bu oturumda bulunmayabilir. Yönetici kayıt detayındaki Takip bağlantısı veya QR kod düğmesine basınca eski bağlantının iptal edileceğine dair onay görür. Onaydan sonra yeni bağlantı oluşturulur ve istenen kopyalama/QR işlemi bu yeni bağlantıyla yapılır. Bağlantı ayrıca seçilip kopyalanabilen bir alanda gösterilir. Aynı oturumda mevcut bağlantı varsa düğmeler yeni bağlantı üretmeden onu kullanır. Teknisyenler bağlantıyı yenileyemez.
+
+## 501 NotImplemented yükleme hatasından sonra
+
+Güncel paketteki kaynakları birlikte kullanın. Yerelde eski Node işlemini Ctrl+C ile kapatıp `pnpm dev` ile yeniden açın. Vercel'de güncel kaynağı yeniden dağıtın. Bu düzeltme için yeni veritabanı migration'ı veya yeni depolama anahtarı gerekmez. Uygulama eski bir terminalden çalışıyorsa yalnızca tarayıcıyı yenilemek sunucu kodunu güncellemez.
+
+501 yerine erişim reddi veya kova bulunamadı açıklaması gelirse mevcut ortam değişkenlerini kontrol edin; sırları paylaşmayın.

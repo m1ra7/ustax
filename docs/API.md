@@ -31,7 +31,7 @@ Temel yol `/api/v1`. Yanıtlar JSON. Çalışanlar HttpOnly oturum çerezi veya 
 | POST `/track/{token}/code` | Müşteri | `{}`; gerçek e-posta gönderimi; `{challengeId,message}` |
 | POST `/track/{token}/decision` | Müşteri | `{challengeId,code,version,decision}` |
 | GET `/users` | Yönetici | Personel listesi |
-| POST `/users` | Yönetici | `{name,email,role}`; rol `admin` veya `technician` |
+| POST `/users` | Yönetici | `{name,email,role,password}`; rol `admin` veya `technician` |
 | PATCH `/users` | Yönetici | `{id,active? ,role?}`; kendi hesabını değiştiremez |
 | POST `/tokens` | Yönetici | `{staffId,days}`; 1–30 gün; `{token,warning}` |
 | DELETE `/tokens` | Yönetici | `{staffId}`; çalışanın tüm mobil anahtarlarını iptal eder |
@@ -93,4 +93,23 @@ Hata/bildirim nesnelerinin `error`, `message`, `warning` alanları istek dilinde
 
 ## Bağımsız web girişi
 
-`POST /auth/login`: `{email,password}`; 8 saatlik HttpOnly, SameSite=Lax (üretimde Secure) çerez kurar. `POST /auth/logout`: mevcut çerezin sunucudaki oturumunu iptal eder. Her ikisi de aynı origin gerektirir. Giriş IP ve e-posta/IP kapsamında 15 dakikada 10 denemeyle sınırlıdır. Tarayıcı istekleri kimlik başlıkları göndererek rol alamaz. Çalışan parolaları API yanıtlarında yer almaz; ilk parola ve sıfırlama yetkili CLI ile yapılır.
+`POST /auth/login`: `{email,password}`; 8 saatlik HttpOnly, SameSite=Lax (üretimde Secure) çerez kurar. `POST /auth/logout`: mevcut çerezin sunucudaki oturumunu iptal eder. Her ikisi de aynı origin gerektirir. Giriş IP ve e-posta/IP kapsamında 15 dakikada 10 denemeyle sınırlıdır. Tarayıcı istekleri kimlik başlıkları göndererek rol alamaz. Çalışan parolaları API yanıtlarında yer almaz; ilk parola ve başka bir çalışanın parola yenilemesi yönetici panelinden yapılabilir; yetkili CLI acil durum yöntemidir.
+
+## Yönetici: çalışan parolaları
+
+- `POST /api/v1/users`: `email`, `name`, `role` ve isteğe bağlı `password` (12–200 karakter). Web formu başlangıç parolasını zorunlu ister. Parola özeti ve çalışan tek veritabanı işlemiyle kaydedilir; yanıt parolayı içermez. Eski mobil istemciler parola vermeden hesap oluşturabilir, ardından parola yönetici tarafından belirlenir.
+- `PATCH /api/v1/users/password`: `{id, password}`. Yalnızca yönetici başka bir çalışanın parolasını değiştirir; ilgili çalışanın bütün oturumları ve API anahtarları iptal edilir.
+- `PATCH /api/v1/users`: rol/aktiflik değişiklikleri de eski oturumları iptal eder.
+
+Parola içeren istekleri yalnızca HTTPS üzerinden gönderin. Bu uç noktalar normal çalışan oturumu veya yönetici Bearer anahtarı, kaynak doğrulaması ve istek sınırlaması kullanır.
+
+## Geçmiş adımını kaldırma
+
+`DELETE /api/v1/records/:id/events/:eventId`: yalnızca yönetici. Adımı görünür geçmişten kaldırır; özgün olay veritabanında korunur. Güncelleme ve denetim kaydı atomiktir; sürüm çakışması 409, olmayan/kaldırılmış olay 404, teknisyen 403 alır. Yanıtta güncellenmiş servis kaydı döner. Durum ve teklif onayları değişmez.
+
+
+## Para birimi ve iOS uyumluluğu
+
+POST `/records` alanı `currency`: `EUR`, `TRY` veya `USD`; gönderilmezse `TRY`. Tutarlar seçilen para biriminin yüzde biri olarak tamsayı saklanır. Kur dönüşümü yoktur. Para birimi servis JSONB verisinde saklanır; ek migration gerekmez. GET `/records` ve GET `/track/{token}` para birimini taşır. Önceki para birimi bulunmayan kayıtlar TRY kabul edilir. Mevcut kayıtların para birimini değiştirme uç noktası yoktur.
+
+DELETE `/records/{id}/events/{eventId}` yalnızca yönetici: adım görünümden kaldırılır, özgün bilgi ve denetim izi saklanır. POST `/users` ilk parola için `password` (12–200 karakter) kabul eder. PATCH `/users/password` yönetici tarafından başka bir çalışan için `{id,password}` alır, mevcut oturumları iptal eder. İstemciye parolanın hash değeri dönmez.

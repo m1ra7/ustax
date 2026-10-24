@@ -1,4 +1,6 @@
-import {verifyPassword} from '../../../../lib/password';
+import {hideHistoryEvent,hideHistoryStatement} from '../../../../lib/history';
+import {createStaffSchema,resetStaffPasswordSchema} from '../../../../lib/staff-input';
+import {passwordHash,verifyPassword} from '../../../../lib/password';
 import {requestLanguage,translate} from '../../../../lib/i18n/core';
 import {verificationEmail} from '../../../../lib/i18n/email';
 import {decisionStatement} from '../../../../lib/decision';
@@ -43,8 +45,21 @@ await rate(req,'staff',180);const u=await staff(req);if(!checkRole(u.role,p[0]))
 if(p[0]==='me')return json(u);
 if(p[0]==='users'){
  if(method==='GET')return json(await db().select().from(users));
- if(method==='POST'){const b=z.object({email:z.string().email(),name:z.string().min(2).max(100),role:z.enum(['admin','technician'])}).parse(await req.json());const created=await db().insert(users).values({...b,email:b.email.toLowerCase(),id:crypto.randomUUID()}).returning();await db().insert(audit).values({id:crypto.randomUUID(),actorId:u.id,action:'staff.created',targetId:created[0].id});return json(created[0],201);}
- if(method==='PATCH'){const b=z.object({id:z.string(),active:z.boolean().optional(),role:z.enum(['admin','technician']).optional()}).refine(x=>x.active!==undefined||x.role!==undefined).parse(await req.json());if(b.id===u.id)throw new HttpError(409,'Kendi yetkinizi veya erişiminizi değiştiremezsiniz.');await db().update(users).set({...(b.active!==undefined?{active:b.active}:{}),...(b.role?{role:b.role}:{})}).where(eq(users.id,b.id));await db().insert(audit).values({id:crypto.randomUUID(),actorId:u.id,action:b.role?'staff.role_changed':b.active?'staff.activated':'staff.deactivated',targetId:b.id});return json({ok:true});}}
+ if(p[1]==='password'&&method==='PATCH'){
+ await rate(req,'staff-password:'+u.id,10);const b=resetStaffPasswordSchema.parse(await req.json());
+ if(b.id===u.id)throw new HttpError(409,'Kendi yetkinizi veya erişiminizi değiştiremezsiniz.');
+ const target=(await db().select().from(users).where(eq(users.id,b.id)))[0];if(!target)throw new HttpError(404,'Çalışan bulunamadı.');
+ const value=await passwordHash(b.password);
+ await db().batch([db().insert(credentials).values({staffId:b.id,passwordHash:value}).onConflictDoUpdate({target:credentials.staffId,set:{passwordHash:value}}),db().delete(tokens).where(eq(tokens.staffId,b.id)),db().insert(audit).values({id:crypto.randomUUID(),actorId:u.id,action:'staff.password_changed',targetId:b.id})]);
+ return json({ok:true,message:'Parola güncellendi. Önceki oturumlar kapatıldı.'});}
+ if(method==='POST'){
+ const {password,...b}=createStaffSchema.parse(await req.json());
+ if((await db().select({id:users.id}).from(users).where(eq(users.email,b.email))).length)throw new HttpError(409,'Bu e-posta zaten kullanılıyor.');
+ const id=crypto.randomUUID(),entry={...b,id};
+ if(password){const value=await passwordHash(password);await db().batch([db().insert(users).values(entry),db().insert(credentials).values({staffId:id,passwordHash:value}),db().insert(audit).values({id:crypto.randomUUID(),actorId:u.id,action:'staff.created',targetId:id})]);}
+ else await db().batch([db().insert(users).values(entry),db().insert(audit).values({id:crypto.randomUUID(),actorId:u.id,action:'staff.created',targetId:id})]);
+ return json({...entry,active:true},201);}
+ if(method==='PATCH'){const b=z.object({id:z.string(),active:z.boolean().optional(),role:z.enum(['admin','technician']).optional()}).refine(x=>x.active!==undefined||x.role!==undefined).parse(await req.json());if(b.id===u.id)throw new HttpError(409,'Kendi yetkinizi veya erişiminizi değiştiremezsiniz.');await db().batch([db().update(users).set({...(b.active!==undefined?{active:b.active}:{}),...(b.role?{role:b.role}:{})}).where(eq(users.id,b.id)),db().delete(tokens).where(eq(tokens.staffId,b.id)),db().insert(audit).values({id:crypto.randomUUID(),actorId:u.id,action:b.role?'staff.role_changed':b.active?'staff.activated':'staff.deactivated',targetId:b.id})]);return json({ok:true});}}
 if(p[0]==='tokens'&&method==='POST'){const b=z.object({staffId:z.string(),days:z.number().int().min(1).max(30)}).parse(await req.json());const token=randomToken();await db().insert(tokens).values({hash:await hash(token),staffId:b.staffId,expiresAt:new Date(Date.now()+b.days*86400000)});await db().insert(audit).values({id:crypto.randomUUID(),actorId:u.id,action:'api_token.created',targetId:b.staffId});return json({token,warning:'Yalnızca bir kez gösterilir. Keychain içinde saklayın.'},201);}
 if(p[0]==='tokens'&&method==='DELETE'){const b=z.object({staffId:z.string()}).parse(await req.json());await db().delete(tokens).where(eq(tokens.staffId,b.staffId));await db().insert(audit).values({id:crypto.randomUUID(),actorId:u.id,action:'api_token.revoked',targetId:b.staffId});return json({ok:true});}
 if(p[0]==='customers'&&method==='GET')return json(await db().query.customers.findMany());
@@ -52,6 +67,14 @@ if(p[0]==='records'){
  if(p.length===1&&method==='GET'){const rows=await db().select({data:records.data}).from(records);return json(rows.map(x=>x.data).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)));}
  if(p.length===1&&method==='POST')return json(await createRecord(await req.json(),u.name),201);
  const id=p[1];if(method==='GET')return json((await getRecord(id)).data);
+ if(p[2]==='events'&&method==='DELETE'){
+ if(u.role!=='admin')throw new HttpError(403,'Yönetici yetkisi gerekiyor.');
+ const eventId=z.string().min(1).max(200).parse(p[3]);const row=await getRecord(id);
+ const data=hideHistoryEvent(row.data,eventId,u.id);
+ const statement=hideHistoryStatement(id,row.revision,data,u.id,eventId,crypto.randomUUID());
+ const changed=await sqlClient().query(statement.text,statement.params);
+ if(!changed.length)throw new HttpError(409,'Kayıt başka bir çalışan tarafından değiştirildi. Yenileyip tekrar deneyin.');
+ return json(data);}
  if(p[2]==='rotate'&&method==='POST'){if(u.role!=='admin')throw new HttpError(403,'Yönetici yetkisi gerekiyor.');const token=randomToken();const row=await getRecord(id);event(row.data,u.name,'Takip bağlantısı yenilendi.',true);const changed=await db().update(records).set({tokenHash:await hash(token),data:row.data,revision:row.revision+1}).where(and(eq(records.id,id),eq(records.revision,row.revision))).returning();if(!changed.length)throw new HttpError(409,'Kayıt değişti. Tekrar deneyin.');return json({token});}
  if(p[2]==='photos'&&method==='POST'){await getRecord(id);const f=await req.formData();const file=f.get('file');if(!(file instanceof File))throw new HttpError(400,'Fotoğraf seçin.');const phase=z.enum(['Kabul','Tamir öncesi','Tamir sonrası']).parse(f.get('phase'));const photo=await uploadPhoto(file,id);return json(await mutate(id,u.name,r=>{r.photos.push({...photo,phase,visible:f.get('visible')==='true'});event(r,u.name,'Fotoğraf eklendi.',true);}));}
  if(p[2]==='photos'&&method==='PATCH'){const b=z.object({id:z.string(),visible:z.boolean()}).parse(await req.json());return json(await mutate(id,u.name,r=>{const photo=r.photos.find(p=>p.id===b.id);if(!photo)throw new HttpError(404,'Fotoğraf yok.');photo.visible=b.visible;event(r,u.name,'Fotoğraf görünürlüğü değiştirildi.',true);}));}

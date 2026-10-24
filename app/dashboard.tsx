@@ -2,6 +2,7 @@
 import { useEffect, useState, useMemo, useRef } from 'react';
 import { LayoutDashboard, Wrench, Users, Smartphone, FileText, Settings, Search, Plus, ChevronDown, ChevronRight, ArrowUpRight, ArrowRight, Sun, Moon, Bell, SlidersHorizontal, MoreHorizontal, Check, Clock, Package, Activity, CheckCircle2, ArrowDown, Menu, X, Mail, Phone, Copy, QrCode, ExternalLink, Upload, ShieldCheck, LogOut, Monitor, Tablet, Grid2X2, List, AlertCircle, Loader2, Link as LinkIcon, RotateCw, Lock, Inbox } from 'lucide-react';
 import QRCode from 'qrcode';
+import {preparePhoto,uploadFailure} from '../lib/photo-client';
 import { ThemeSwitch } from './theme';
 import { useI18n, LanguageSelect } from './language';
 import { clientLanguage } from '../lib/i18n/core';
@@ -28,6 +29,9 @@ export default function Dashboard() {
     const [data, setData] = useState<RecordData[]>([]), [loading, setLoading] = useState(true), [demo, setDemo] = useState(false), [error, setError] = useState(''), [health, setHealth] = useState<any>({}), [me, setMe] = useState<any>(null);
     const [page, setPage] = useState('Genel bakış'), [query, setQuery] = useState(''), [filter, setFilter] = useState('Tümü'), [kind, setKind] = useState('Tüm cihazlar'), [sort, setSort] = useState('new'), [cards, setCards] = useState(false), [filters, setFilters] = useState(false), [mobile, setMobile] = useState(false), [modal, setModal] = useState(false), [selected, setSelected] = useState<RecordData | null>(null), [tab, setTab] = useState('Genel bilgiler'), [toast, setToast] = useState(''), [busy, setBusy] = useState(false), [tokens, setTokens] = useState<Record<string, string>>({}), [qr, setQr] = useState(''), [team, setTeam] = useState<any[]>([]);
     const searchRef = useRef<HTMLInputElement>(null);
+    const linkBusyRef = useRef(false);
+    const selectedIdRef = useRef<string | null>(null);
+    selectedIdRef.current = selected?.id ?? null;
     async function load() {
         setLoading(true);
         try {
@@ -103,6 +107,9 @@ export default function Dashboard() {
         if (page === 'Ekip ve yetkiler' && !demo && me?.role === 'admin')
             api('users').then(setTeam).catch(e => setToast(e.message));
     }, [page, demo, me]);
+    useEffect(() => {
+        if (selected) document.querySelector<HTMLElement>('.record-detail-screen .drawer')?.scrollTo({ top: 0 });
+    }, [tab, selected?.id]);
     const view = useMemo(() => data.filter(r => (filter === 'Tümü' || r.status === filter) && (kind === 'Tüm cihazlar' || r.kind === kind) && `${r.name} ${r.phone} ${r.model} ${r.number} ${r.technician} ${r.createdAt}`.toLocaleLowerCase(locale).includes(query.toLocaleLowerCase(locale))).sort((a, b) => sort === 'old' ? a.createdAt.localeCompare(b.createdAt) : sort === 'name' ? a.name.localeCompare(b.name, locale) : b.createdAt.localeCompare(a.createdAt)), [data, filter, kind, query, sort, locale]);
     const count = (s: string) => data.filter(r => r.status === s).length;
     const active = data.filter(r => !['Teslim edildi', 'İptal edildi'].includes(r.status)).length;
@@ -129,27 +136,73 @@ export default function Dashboard() {
             setBusy(false);
         }
     }
-    const trackUrl = selected ? (demo ? '/takip/ornek' : tokens[selected.id] ? '/takip/' + tokens[selected.id] : '') : '';
-    async function copy() {
-        if (!trackUrl) {
-            setToast('Güvenli bağlantı ilk kayıtta gösterilir. Yönetici yeni bağlantı üretebilir.');
-            return;
-        }
+    async function removeHistory(eventId: string) {
+        if (!selected || busy || me?.role !== 'admin') return;
+        if (!window.confirm(t('Bu adım geçmişten kaldırılacak. Servis durumu değişmeyecek. Devam edilsin mi?'))) return;
+        const id = selected.id;setBusy(true);
         try {
-            await navigator.clipboard.writeText(location.origin + trackUrl);
-            setToast('Takip bağlantısı kopyalandı.');
+            const updated: RecordData = await api('records/' + id + '/events/' + eventId, 'DELETE');
+            setData(previous => previous.map(item => item.id === id ? updated : item));
+            setSelected(previous => previous?.id === id ? updated : previous);
+            setToast('Geçmiş adımı kaldırıldı.');
+        } catch(error) {setToast((error as Error).message);} finally {setBusy(false);}
+    }
+    const trackUrl = selected ? (demo ? '/takip/ornek' : tokens[selected.id] ? '/takip/' + tokens[selected.id] : '') : '';
+    async function ensureTrackingLink(renew = false): Promise<string> {
+        if (!selected || linkBusyRef.current) return '';
+        if (demo) {
+            if (renew) { setToast('Örnek kayıtların bağlantısı yenilenemez.'); return ''; }
+            return '/takip/ornek';
         }
-        catch {
-            setToast(location.origin + trackUrl);
+        if (trackUrl && !renew) return trackUrl;
+        if (me?.role !== 'admin') {
+            setToast('Takip bağlantısını yenilemek için yöneticinizle iletişime geçin.');
+            return '';
+        }
+        if (!window.confirm(t('Yeni bağlantı oluşturulunca eski bağlantı iptal edilir. Devam edilsin mi?'))) return '';
+        const recordId = selected.id;
+        linkBusyRef.current = true; setBusy(true);
+        try {
+            const result = await api('records/' + recordId + '/rotate', 'POST');
+            setTokens(previous => ({ ...previous, [recordId]: result.token }));
+            if (selectedIdRef.current !== recordId) return '';
+            setQr('');
+            setToast('Yeni bağlantı oluşturuldu. Eski bağlantı iptal edildi.');
+            return '/takip/' + result.token;
+        } catch (error) {
+            setToast((error as Error).message);
+            return '';
+        } finally {
+            linkBusyRef.current = false; setBusy(false);
         }
     }
+    async function copy() {
+        const path = await ensureTrackingLink();
+        if (!path) return;
+        try {
+            await navigator.clipboard.writeText(location.origin + path);
+            setToast('Takip bağlantısı kopyalandı.');
+        } catch {
+            setToast('Bağlantı hazır. Aşağıdaki alandan kopyalayabilirsiniz.');
+        }
+    }
+    async function showTrackingQR() {
+        const id = selected?.id;
+        const path = await ensureTrackingLink();
+        if (!path || selectedIdRef.current !== id) return;
+        try {
+            const image = await QRCode.toDataURL(location.origin + path, { width: 220, margin: 2 });
+            if (selectedIdRef.current === id) setQr(image);
+        } catch { setToast('QR kod oluşturulamadı. Tekrar deneyin.'); }
+    }
+
     return <div className="app-shell">
  {mobile && <button className="scrim" aria-label={t("Menüyü kapat")} onClick={() => setMobile(false)}/>}
  <aside className={'sidebar ' + (mobile ? 'is-open' : '')}><a className="brand" href="/" onClick={e => { e.preventDefault(); go('Genel bakış'); }}>UstaX</a>
  <div className="workspace"><div><b>{t('Teknik servis')}</b><small>{t('Servis çalışma alanı')}</small></div></div>
  <div className="nav-label">{t("ÇALIŞMA ALANI")}</div><nav>{nav.map(([p, Icon]) => <button key={p} className={page === p ? 'active' : ''} onClick={() => go(p)}><span>{t(p)}</span>{p === 'Servis kayıtları' && <em>{active}</em>}{p === 'Fiyat teklifleri' && count('Fiyat onayı bekliyor') > 0 && <i className="nav-dot"/>}</button>)}</nav>
- <div className="nav-label management">{t("YÖNETİM")}</div><nav><button onClick={() => go('Ekip ve yetkiler')} className={page === 'Ekip ve yetkiler' ? 'active' : ''}>{t("Ekip ve yetkiler")}</button><button onClick={() => go('Ayarlar')} className={page === 'Ayarlar' ? 'active' : ''}>{t("Ayarlar")}</button></nav>
- <div className="sidebar-bottom"><button className="profile" onClick={() => go('Ekip ve yetkiler')}><span><b>{me?.name || 'Miraç Suiçmez'}</b><small>{demo ? t('Örnek yönetici') : me?.role === 'admin' ? t('Yönetici') : t('Teknisyen')}</small></span></button></div></aside>
+ <div className="nav-label management">{t("YÖNETİM")}</div><nav>{(demo || me?.role === 'admin') && <button onClick={() => go('Ekip ve yetkiler')} className={page === 'Ekip ve yetkiler' ? 'active' : ''}>{t("Ekip ve yetkiler")}</button>}<button onClick={() => go('Ayarlar')} className={page === 'Ayarlar' ? 'active' : ''}>{t("Ayarlar")}</button></nav>
+ <div className="sidebar-bottom"><button className="profile" onClick={() => go(me?.role === 'admin' || demo ? 'Ekip ve yetkiler' : 'Ayarlar')}><span><b>{me?.name || 'Miraç Suiçmez'}</b><small>{demo ? t('Örnek yönetici') : me?.role === 'admin' ? t('Yönetici') : t('Teknisyen')}</small></span></button></div></aside>
  <div className="main-shell"><header className="topbar"><div className="breadcrumb"><button className="icon-btn mobile-menu" aria-label={t("Menüyü aç")} onClick={() => setMobile(true)}><Menu size={20} aria-hidden="true"/></button><span>{t("Çalışma alanı")}</span><b>{t(page)}</b></div><div className="top-actions"><div className="global-search"><input ref={searchRef} placeholder={t("Hızlı arama...")} value={query} onChange={e => {
             setQuery(e.target.value);
             if (!['Genel bakış', 'Servis kayıtları'].includes(page))
@@ -166,7 +219,7 @@ export default function Dashboard() {
  </section>}
  {page === 'Müşteriler' && <div className="panel"><div className="panel-title"><h2>{t("Müşteri rehberi")}</h2><span>{t('{count} müşteri', { count: new Set(data.map(r => r.customerId)).size })}</span></div><div className="people-grid">{Array.from(new Map(data.map(r => [r.customerId, r])).values()).map(r => <button className="person-card" key={r.customerId} onClick={() => { go('Servis kayıtları'); setQuery(r.phone); }}><h3>{r.name}</h3><p>{r.phone}</p><small>{t('{count} servis kaydı', { count: data.filter(x => x.customerId === r.customerId).length })}</small><span className="text-btn">{t("Servis geçmişi")}</span></button>)}</div></div>}
  {page === 'Cihazlar' && <div className="panel"><div className="panel-title"><h2>{t("Cihaz arşivi")}</h2><span>{t('{count} cihaz', { count: new Set(data.map(r => r.deviceId)).size })}</span></div><div className="people-grid">{Array.from(new Map(data.map(r => [r.deviceId, r])).values()).map(r => <button className="person-card" key={r.deviceId} onClick={() => { go('Servis kayıtları'); setQuery(r.serial || r.model); }}><Device r={r}/><p>{r.name}</p><small>{r.serial ? t('Seri / IMEI: {serial}', { serial: r.serial }) : t('Seri numarası eklenmemiş')}</small><span className="text-btn">{t("Cihaz geçmişi")}</span></button>)}</div></div>}
- {page === 'Fiyat teklifleri' && <div className="panel"><div className="panel-title"><h2>{t("Teklifler ve müşteri kararları")}</h2><span>{t('{count} teklif', { count: data.filter(r => r.quotes.length).length })}</span></div><div className="quote-list">{data.filter(r => r.quotes.length).map(r => { const q = r.quotes.at(-1)!; return <button key={r.id} className="quote-row" onClick={() => { open(r); setTab('Fiyat teklifi'); }}><Device r={r}/><span>{r.name}<small>{r.number} · v{q.version}</small></span><Badge status={q.decision === 'pending' ? 'Fiyat onayı bekliyor' : q.decision === 'approved' ? 'Teslime hazır' : 'Teklif reddedildi'}/><strong>{money(q.total)}</strong></button>; })}{!data.some(r => r.quotes.length) && <div className="empty">{t("Henüz teklif oluşturulmadı.")}</div>}</div></div>}
+ {page === 'Fiyat teklifleri' && <div className="panel"><div className="panel-title"><h2>{t("Teklifler ve müşteri kararları")}</h2><span>{t('{count} teklif', { count: data.filter(r => r.quotes.length).length })}</span></div><div className="quote-list">{data.filter(r => r.quotes.length).map(r => { const q = r.quotes.at(-1)!; return <button key={r.id} className="quote-row" onClick={() => { open(r); setTab('Fiyat teklifi'); }}><Device r={r}/><span>{r.name}<small>{r.number} · v{q.version}</small></span><Badge status={q.decision === 'pending' ? 'Fiyat onayı bekliyor' : q.decision === 'approved' ? 'Teslime hazır' : 'Teklif reddedildi'}/><strong>{money(q.total, r.currency)}</strong></button>; })}{!data.some(r => r.quotes.length) && <div className="empty">{t("Henüz teklif oluşturulmadı.")}</div>}</div></div>}
  {page === 'Ekip ve yetkiler' && <div className="panel settings-panel"><h2>{t("Ekip ve yetkiler")}</h2><p className="muted">{t("Yöneticiler ekip üyelerini tanımlar. Teknisyenler servis sürecini yönetir.")}</p><div className="people-grid">{(demo ? [{ name: 'Miraç Suiçmez', role: 'admin', email: 'Örnek yönetici', active: true }, ...['Ayşe Yıldız', 'Mert Kaya', 'Ece Deniz'].map(name => ({ name, role: 'technician', email: 'Örnek teknisyen', active: true }))] : team).map((u, i) => <div className="person-card" key={u.id || i}><h3>{u.name}</h3><p>{demo ? t(u.email) : u.email}</p><span className="badge">{u.role === 'admin' ? t('Yönetici') : t('Teknisyen')} · {u.active ? t('Aktif') : t('Pasif')}</span>{!demo && me?.role === 'admin' && u.id !== me?.id && <select aria-label={t('{person} rolü', { person: u.name })} value={u.role} onChange={async (e) => {
                             try {
                                 await api('users', 'PATCH', { id: u.id, role: e.target.value });
@@ -176,7 +229,7 @@ export default function Dashboard() {
                             catch (e) {
                                 setToast((e as Error).message);
                             }
-                        }}><option value="admin">{t("Yönetici")}</option><option value="technician">{t("Teknisyen")}</option></select>}{!demo && u.id !== me?.id && <button className="text-btn" onClick={async () => {
+                        }}><option value="admin">{t("Yönetici")}</option><option value="technician">{t("Teknisyen")}</option></select>}{!demo && me?.role === 'admin' && u.id !== me?.id && <button className="text-btn" onClick={async () => {
                             try {
                                 await api('users', 'PATCH', { id: u.id, active: !u.active });
                                 setTeam(await api('users'));
@@ -185,60 +238,43 @@ export default function Dashboard() {
                             catch (e) {
                                 setToast((e as Error).message);
                             }
-                        }}>{u.active ? t('Erişimi kapat') : t('Erişimi aç')}</button>}</div>)}</div>{(demo || me?.role === 'admin') && <form className="inline-form" onSubmit={async (e) => {
+                        }}>{u.active ? t('Erişimi kapat') : t('Erişimi aç')}</button>}{!demo && me?.role === 'admin' && u.id !== me.id && <StaffPasswordForm staffId={u.id} onSaved={setToast}/>}</div>)}</div>{(demo || me?.role === 'admin') && <form className="inline-form" onSubmit={async (e) => {
                         e.preventDefault();
                         if (demo) {
                             setToast('Ekip yönetimi için veritabanını bağlayın.');
                             return;
                         }
-                        const f = new FormData(e.currentTarget);
+                        const form = e.currentTarget;
+                        const f = new FormData(form);
+                        setBusy(true);
                         try {
                             await api('users', 'POST', Object.fromEntries(f));
                             setTeam(await api('users'));
+                            form.reset();
                             setToast('Çalışan eklendi. Tanımlı e-posta hesabıyla giriş yapabilir.');
                         }
                         catch (e) {
                             setToast((e as Error).message);
-                        }
-                    }}><h3>{t("Çalışan ekle")}</h3><input name="name" placeholder={t("Ad soyad")} aria-label={t("Çalışan adı")} required/><input name="email" type="email" placeholder={t("Giriş e-postası")} aria-label={t("Çalışan e-postası")} required/><select name="role" aria-label={t("Rol")}><option value="technician">{t("Teknisyen")}</option><option value="admin">{t("Yönetici")}</option></select><button className="btn primary">{t("Ekle")}</button></form>}{!demo && me?.role !== 'admin' && <p>{t("Bu alanı yönetmek için yönetici yetkisi gerekiyor.")}</p>}</div>}
+                        } finally { setBusy(false); }
+                    }}><h3>{t("Çalışan ekle")}</h3><input name="name" placeholder={t("Ad soyad")} aria-label={t("Çalışan adı")} required/><input name="email" type="email" placeholder={t("Giriş e-postası")} aria-label={t("Çalışan e-postası")} required/><input name="password" type="password" autoComplete="new-password" minLength={12} maxLength={200} placeholder={t("Başlangıç parolası (en az 12 karakter)")} aria-label={t("Başlangıç parolası (en az 12 karakter)")} required/><select name="role" aria-label={t("Rol")}><option value="technician">{t("Teknisyen")}</option><option value="admin">{t("Yönetici")}</option></select><button disabled={busy} className="btn primary">{t("Ekle")}</button></form>}{!demo && me?.role !== 'admin' && <p>{t("Bu alanı yönetmek için yönetici yetkisi gerekiyor.")}</p>}</div>}
  {page === 'Ayarlar' && <div className="settings-grid"><section className="panel settings-panel"><h2>{t("Çalışma alanı ayarları")}</h2><p className="muted">{t("Bağlantıların durumu sunucudan kontrol edilir.")}</p>{[['PostgreSQL veritabanı', health.database, 'DATABASE_URL'], ['Korumalı fotoğraf depolama', health.photos, 'S3 / Cloudinary'], ['E-posta ile teklif doğrulama', health.email, 'RESEND_API_KEY, EMAIL_FROM']].map(([title, ready, key]) => <div className="connection" key={String(title)}><div><b>{t(title)}</b><small>{key}</small></div><span className={'badge ' + (ready ? 'status-5' : 'status-2')}>{ready ? t('Yapılandırıldı') : t('Bağlantı gerekli')}</span></div>)}<p className="callout">{t("Müşteriler, kayıtlı e-postalarına gelen 10 dakika geçerli tek kullanımlık kod ile teklif kararını doğrular. E-postası olmayan müşteriler için çalışan önce doğrulanacak adresi kaydetmelidir.")}</p><button className="btn" onClick={load}>{t("Bağlantıları kontrol et")}</button></section><section className="panel settings-panel"><h2>{t("Görünüm ve dil")}</h2><p className="muted">{t("Tema tercihiniz bu tarayıcıda saklanır.")}</p><div className="language-settings"><div><h3>{t("Uygulama dili")}</h3><p className="muted">{t("Dil tercihiniz bu tarayıcıda saklanır.")}</p></div><LanguageSelect /></div><hr /><h3>{t("Güvenli erişim")}</h3><p className="muted">{t("Çalışan hesapları sunucu tarafında yetkilendirilir. Mobil API erişimi süreli ve iptal edilebilir Bearer anahtarlarıyla hazırlanmıştır.")}</p><button className="btn" onClick={async()=>{if(me)await api('auth/logout','POST',{});window.location.href='/yonetim/giris';}}>{me ? t('Oturumu kapat') : t('Çalışan girişi')}</button></section></div>}
  </>}
  </main><footer className="app-footer"><ThemeSwitch/><span>© {new Date().getFullYear()} UstaX</span></footer></div>
  {toast && <div role="status" className="toast">{t(toast)}<button aria-label={t("Bildirimi kapat")} onClick={() => setToast('')}>{t("Kapat")}</button></div>}
  {modal && <Intake demo={demo} team={Array.from(new Set(data.map(r => r.technician)))} onClose={() => setModal(false)} onCreated={(r, token) => { setData([r, ...data]); setTokens({ ...tokens, [r.id]: token }); setModal(false); open(r); setToast('Servis kaydı oluşturuldu. Güvenli bağlantıyı müşterinizle paylaşın.'); }}/>}
- {selected && <div className="drawer-overlay" onClick={() => setSelected(null)}><section className="drawer" role="dialog" aria-modal="true" aria-label={t("Servis detayı")} onClick={e => e.stopPropagation()}><div className="drawer-top"><span className="eyebrow">{t("SERVİS DETAYI")}</span><button autoFocus className="icon-btn" onClick={() => setSelected(null)} aria-label={t("Detayı kapat")}>{t("Kapat")}</button></div><div className="drawer-title"><div><h2>{selected.model}</h2><span>{selected.number} · {date(selected.createdAt)}</span></div><Badge status={selected.status}/></div><div className="drawer-links"><button className="btn compact" onClick={copy}>{t("Takip bağlantısı")}</button><button className="btn compact" onClick={async () => {
-                if (!trackUrl) {
-                    setToast('Önce yönetici yeni takip bağlantısı oluşturmalı.');
-                    return;
-                }
-                setQr(await QRCode.toDataURL(location.origin + trackUrl, { width: 220, margin: 2 }));
-            }}>{t("QR kod")}</button>{trackUrl && <a className="btn compact" href={trackUrl} target="_blank" rel="noreferrer">{t("Müşteri görünümü")}</a>}</div>{qr && <div className="qr-preview"><img src={qr} alt={t("Güvenli müşteri takip bağlantısı QR kodu")}/><p>{t("Bu bağlantı yalnızca bu kayda erişim sağlar.")}</p></div>}
- <div className="detail-tabs">{['Genel bilgiler', 'İşlem geçmişi', 'Fiyat teklifi', 'Fotoğraflar'].map(label => <button className={tab === label ? 'selected' : ''} onClick={() => setTab(label)} key={label}>{t(label)}</button>)}</div><div className="drawer-body">
+ {selected && <div className="drawer-overlay record-detail-screen"><section className="drawer" role="dialog" aria-modal="true" aria-label={t("Servis detayı")} onClick={e => e.stopPropagation()}><div className="drawer-top"><span className="eyebrow">{t("SERVİS DETAYI")}</span><button autoFocus className="icon-btn" onClick={() => setSelected(null)} aria-label={t("Detayı kapat")}>{t("Kapat")}</button></div><div className="drawer-title"><div><h2>{selected.model}</h2><span>{selected.number} · {date(selected.createdAt)}</span></div><Badge status={selected.status}/></div><div className="drawer-links"><button disabled={busy} className="btn compact" onClick={copy}>{t("Takip bağlantısı")}</button><button disabled={busy} className="btn compact" onClick={showTrackingQR}>{t("QR kod")}</button>{trackUrl && <a className="btn compact" href={trackUrl} target="_blank" rel="noreferrer">{t("Müşteri görünümü")}</a>}</div>
+ {!trackUrl && me?.role === 'admin' && <p className="callout">{t("Bağlantı bu oturumda mevcut değil. Takip bağlantısı veya QR kod düğmesiyle yeni bir bağlantı oluşturabilirsiniz.")}</p>}
+ {trackUrl && <label className="detail-block">{t("Müşteri takip bağlantısı")}<input readOnly value={location.origin + trackUrl} aria-label={t("Müşteri takip bağlantısı")} onFocus={event => event.currentTarget.select()}/></label>}
+ {qr && <div className="qr-preview"><img src={qr} alt={t("Güvenli müşteri takip bağlantısı QR kodu")}/><p>{t("Bu bağlantı yalnızca bu kayda erişim sağlar.")}</p></div>}
+ <div className="detail-tabs" role="tablist" aria-label={t("Servis detayı")}>{['Genel bilgiler', 'İşlem geçmişi', 'Fiyat teklifi', 'Fotoğraflar'].map((label,index) => <button role="tab" id={"record-tab-"+index} aria-selected={tab === label} aria-controls="record-tabpanel" className={tab === label ? 'selected' : ''} onClick={() => setTab(label)} key={label}>{t(label)}</button>)}</div><div className="drawer-body" id="record-tabpanel" role="tabpanel" tabIndex={0} aria-label={t(tab)}>
  {tab === 'Genel bilgiler' && <><div className="detail-block"><h3>{t("Müşteri bilgileri")}</h3><div className="customer-detail"><div><b>{selected.name}</b><p>{selected.phone}</p><p>{selected.email || t('E-posta eklenmemiş')}</p></div></div><form className="inline-form" onSubmit={e => { e.preventDefault(); change('email', { email: new FormData(e.currentTarget).get('email') }); }}><input name="email" type="email" required placeholder={t("Doğrulama için e-posta adresi")} aria-label={t("Müşteri e-posta adresi")}/><button className="btn compact">{t("Kaydet")}</button></form></div><div className="detail-block"><h3>{t("Cihaz kabulü")}</h3><dl><dt>{t("Bildirilen arıza")}</dt><dd>{content(selected.fault)}</dd><dt>{t("Fiziksel durum")}</dt><dd>{selected.condition ? content(selected.condition) : t('Belirtilmedi')}</dd><dt>{t("Aksesuarlar")}</dt><dd>{selected.accessories ? content(selected.accessories) : t('Yok')}</dd><dt>{t("Seri numarası / IMEI")}</dt><dd>{selected.serial || t('Belirtilmedi')}</dd><dt>{t("Sorumlu teknisyen")}</dt><dd>{selected.technician}</dd></dl></div><div className="detail-block"><h3>{t("Süreci güncelle")}</h3><p className="muted">{t("Müşteri onayı, tamamlama ve teslim kuralları sunucuda denetlenir.")}</p><form className="inline-form" onSubmit={e => { e.preventDefault(); change('status', { status: new FormData(e.currentTarget).get('status') }); }}><select name="status" defaultValue={selected.status} aria-label={t("Yeni servis durumu")}>{statuses.map(s => <option key={s} value={s}>{t(s)}</option>)}</select><button disabled={busy} className="btn primary">{t("Güncelle")}</button></form></div>
  {selected.status === 'Tamir ediliyor' && <form className="detail-block form-grid" onSubmit={e => { e.preventDefault(); const f = new FormData(e.currentTarget); change('complete', { ...Object.fromEntries(f), fee: Math.round(Number(f.get('fee')) * 100) }); }}><h3 className="full">{t("Tamiri tamamla")}</h3><label className="full">{t("Yapılan işlemler")}<textarea name="work" required minLength={3}/></label><label className="full">{t("Değiştirilen parçalar")}<input name="parts"/></label><label>{t("Nihai ücret (₺)")}<input type="number" name="fee" min="0" step="0.01" defaultValue={(selected.quotes.at(-1)?.total || 0) / 100} required/></label><label>{t("Garanti süresi ve koşulları")}<input name="warranty"/></label><button className="btn primary" disabled={busy}>{t("Teslime hazır olarak kaydet")}</button></form>}
- {selected.completion && <div className="detail-block"><h3>{t("Tamamlanan işlemler")}</h3><p>{selected.completion.work}</p><p>{selected.completion.parts}</p><strong>{money(selected.completion.fee)}</strong><p>{t("Garanti:")}{' '}{selected.completion.warranty || t('Belirtilmedi')}</p></div>}
+ {selected.completion && <div className="detail-block"><h3>{t("Tamamlanan işlemler")}</h3><p>{selected.completion.work}</p><p>{selected.completion.parts}</p><strong>{money(selected.completion.fee, selected.currency)}</strong><p>{t("Garanti:")}{' '}{selected.completion.warranty || t('Belirtilmedi')}</p></div>}
  {selected.status === 'Teslime hazır' && <form className="detail-block" onSubmit={e => { e.preventDefault(); change('deliver', { note: new FormData(e.currentTarget).get('note') }); }}><h3>{t("Teslim kaydı")}</h3><label>{t("Teslim açıklaması")}<textarea name="note" placeholder={t("Teslim alan kişi ve teslim bilgileri")}/></label><button className="btn primary" disabled={busy}>{t("Teslim edildi olarak kaydet")}</button></form>}
- {(demo || me?.role === 'admin') && <div className="detail-block"><h3>{t("Takip bağlantısını yenile")}</h3><p className="muted">{t("Eski bağlantı anında geçersiz olur. Yeni bağlantıyı müşteriyle paylaşmanız gerekir.")}</p><button className="btn" disabled={busy} onClick={async () => {
-                        if (demo) {
-                            setToast('Örnek kayıtların bağlantısı yenilenemez.');
-                            return;
-                        }
-                        setBusy(true);
-                        try {
-                            const d = await api('records/' + selected.id + '/rotate', 'POST');
-                            setTokens({ ...tokens, [selected.id]: d.token });
-                            setToast('Yeni bağlantı oluşturuldu. Eski bağlantı iptal edildi.');
-                        }
-                        catch (e) {
-                            setToast((e as Error).message);
-                        }
-                        finally {
-                            setBusy(false);
-                        }
-                    }}>{t("Yeni güvenli bağlantı oluştur")}</button></div>}</>}
- {tab === 'İşlem geçmişi' && <><div className="timeline">{[...selected.events].reverse().map(ev => <div className={'timeline-item ' + (ev.internal ? 'internal' : '')} key={ev.id}><small>{date(ev.at)} · {new Date(ev.at).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })}</small><p>{demo ? t(ev.text) : eventText(ev.text)}</p><span>{ev.actor === 'Müşteri' ? t('Müşteri') : ev.actor}{ev.internal ? ' · ' + t('İç not') : ''}</span></div>)}</div><form className="detail-block" onSubmit={e => { e.preventDefault(); const f = new FormData(e.currentTarget); change('notes', { text: f.get('text'), internal: f.get('internal') === 'on' }); e.currentTarget.reset(); }}><h3>{t("Yeni not ekle")}</h3><textarea name="text" required placeholder={t("Süreç hakkında bir açıklama yazın...")} aria-label={t("Not metni")}/><label className="checkbox"><input type="checkbox" name="internal" defaultChecked/>{t("Yalnızca servis çalışanları görsün")}</label><button disabled={busy} className="btn primary">{t("Notu kaydet")}</button></form></>}
- {tab === 'Fiyat teklifi' && <><div className="callout">{t("Tutar veya kapsam değişirse yeni teklif oluşturulur ve yeniden müşteri onayı alınır.")}</div>{[...selected.quotes].reverse().map(q => <div className="detail-block" key={q.version}><div className="panel-title"><h3>{t('Teklif v{version}', { version: q.version })}</h3><span className="badge">{q.decision === 'approved' ? t('Onaylandı') : q.decision === 'rejected' ? t('Reddedildi') : t('Onay bekliyor')}</span></div><p>{content(q.diagnosis)}</p><p className="muted">{content(q.work)}</p>{q.parts.map((p, i) => <div className="price-line" key={i}><span>{content(p.name)}</span><b>{money(p.amount)}</b></div>)}<div className="price-line"><span>{t("İşçilik")}</span><b>{money(q.labor)}</b></div><div className="price-line total"><span>{t("Toplam")}</span><strong>{money(q.total)}</strong></div>{q.decidedAt && <small>{t("Karar:")}{' '}{new Date(q.decidedAt).toLocaleString(locale)}</small>}</div>)}<QuoteForm record={selected} busy={busy} submit={body => change('quote', body)}/></>}
- {tab === 'Fotoğraflar' && <><div className="photo-grid">{selected.photos.map(p => <div key={p.id}><a target="_blank" href={'/api/v1/photos/' + selected.id + '/' + p.id} rel="noreferrer"><img src={'/api/v1/photos/' + selected.id + '/' + p.id} alt={t('{phase} fotoğrafı', { phase: t(p.phase) })}/></a><span>{t(p.phase)}</span><label className="checkbox"><input type="checkbox" checked={p.visible} onChange={e => change('photos', { id: p.id, visible: e.target.checked })}/>{t("Müşteriye göster")}</label></div>)}</div>{!selected.photos.length && <div className="empty"><h3>{t("Henüz fotoğraf eklenmedi.")}</h3><p>{t("Kabul, tamir öncesi ve sonrası fotoğrafları ekleyin.")}</p></div>}<PhotoUpload demo={demo} id={selected.id} onSaved={r => { setSelected(r); setData(data.map(x => x.id === r.id ? r : x)); }}/></>}
+ {(demo || me?.role === 'admin') && <div className="detail-block"><h3>{t("Takip bağlantısını yenile")}</h3><p className="muted">{t("Eski bağlantı anında geçersiz olur. Yeni bağlantıyı müşteriyle paylaşmanız gerekir.")}</p><button className="btn" disabled={busy} onClick={() => { void ensureTrackingLink(true); }}>{t("Yeni güvenli bağlantı oluştur")}</button></div>}</>}
+ {tab === 'İşlem geçmişi' && <><div className="timeline">{selected.events.filter(ev => !ev.deletedAt).slice().reverse().map(ev => <div className={'timeline-item ' + (ev.internal ? 'internal' : '')} key={ev.id}><small>{date(ev.at)} · {new Date(ev.at).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })}</small><p>{demo ? t(ev.text) : eventText(ev.text)}</p><span>{ev.actor === 'Müşteri' ? t('Müşteri') : ev.actor}{ev.internal ? ' · ' + t('İç not') : ''}</span>{!demo && me?.role === 'admin' && <button className="text-btn history-remove" disabled={busy} onClick={() => removeHistory(ev.id)}>{t("Adımı sil")}</button>}</div>)}</div><form className="detail-block" onSubmit={e => { e.preventDefault(); const f = new FormData(e.currentTarget); change('notes', { text: f.get('text'), internal: f.get('internal') === 'on' }); e.currentTarget.reset(); }}><h3>{t("Yeni not ekle")}</h3><textarea name="text" required placeholder={t("Süreç hakkında bir açıklama yazın...")} aria-label={t("Not metni")}/><label className="checkbox"><input type="checkbox" name="internal" defaultChecked/>{t("Yalnızca servis çalışanları görsün")}</label><button disabled={busy} className="btn primary">{t("Notu kaydet")}</button></form></>}
+ {tab === 'Fiyat teklifi' && <><div className="callout">{t("Tutar veya kapsam değişirse yeni teklif oluşturulur ve yeniden müşteri onayı alınır.")}</div>{[...selected.quotes].reverse().map(q => <div className="detail-block" key={q.version}><div className="panel-title"><h3>{t('Teklif v{version}', { version: q.version })}</h3><span className="badge">{q.decision === 'approved' ? t('Onaylandı') : q.decision === 'rejected' ? t('Reddedildi') : t('Onay bekliyor')}</span></div><p>{content(q.diagnosis)}</p><p className="muted">{content(q.work)}</p>{q.parts.map((p, i) => <div className="price-line" key={i}><span>{content(p.name)}</span><b>{money(p.amount, selected.currency)}</b></div>)}<div className="price-line"><span>{t("İşçilik")}</span><b>{money(q.labor, selected.currency)}</b></div><div className="price-line total"><span>{t("Toplam")}</span><strong>{money(q.total, selected.currency)}</strong></div>{q.decidedAt && <small>{t("Karar:")}{' '}{new Date(q.decidedAt).toLocaleString(locale)}</small>}</div>)}<QuoteForm record={selected} busy={busy} submit={body => change('quote', body)}/></>}
+ {tab === 'Fotoğraflar' && <><div className="photo-grid">{selected.photos.map(p => <div key={p.id}><a target="_blank" href={'/api/v1/photos/' + selected.id + '/' + p.id} rel="noreferrer"><img src={'/api/v1/photos/' + selected.id + '/' + p.id} alt={t('{phase} fotoğrafı', { phase: t(p.phase) })}/></a><span>{t(p.phase)}</span><label className="checkbox"><input type="checkbox" checked={p.visible} onChange={e => change('photos', { id: p.id, visible: e.target.checked })}/>{t("Müşteriye göster")}</label></div>)}</div>{!selected.photos.length && <div className="empty"><h3>{t("Henüz fotoğraf eklenmedi.")}</h3><p>{t("Kabul, tamir öncesi ve sonrası fotoğrafları ekleyin.")}</p></div>}<PhotoUpload demo={demo} id={selected.id} onSaved={r => { setSelected(previous => previous?.id === r.id ? r : previous); setData(previous => previous.map(x => x.id === r.id ? r : x)); }}/></>}
  </div><div className="drawer-footer">{t("Değişiklikler işlem geçmişine kaydedilir.")}</div></section></div>}
  </div>;
 }
@@ -295,7 +331,7 @@ function Intake({ demo, team, onClose, onCreated }: {
                     }
             }}><option value="">{t("Yeni müşteri / müşteri seçin")}</option>{existing.map(c => <option value={c.id} key={c.id}>{c.name} · {c.phone}</option>)}</select></label>}<div className="form-grid"><label className="full">{t("Ad soyad *")}<input name="name" required minLength={2} maxLength={120} placeholder={t("Örn. Elif Yılmaz")} autoComplete="name"/></label><label className="full">{t("Telefon numarası *")}<input name="phone" required minLength={10} type="tel" placeholder={t('05xx xxx xx xx')} autoComplete="tel"/></label><label className="full">{t("E-posta adresi")}<input name="email" type="email" placeholder={t('ornek@eposta.com')} autoComplete="email"/><small>{t("Teklif onayı için müşterinin erişebildiği bir e-posta gerekir.")}</small></label></div></div>
  <div hidden={step !== 1} data-step="1"><h3>{t("Cihaz bilgileri")}</h3><div className="form-grid"><label>{t("Cihaz türü *")}<select name="kind"><option value={"Telefon"}>{t("Telefon")}</option><option value={"Tablet"}>{t("Tablet")}</option><option value={"Bilgisayar"}>{t("Bilgisayar")}</option></select></label><label>{t("Marka *")}<input name="brand" required placeholder={t('Apple, Samsung...')}/></label><label>{t("Model *")}<input name="model" required placeholder="iPhone 14 Pro"/></label><label>{t("Seri no / IMEI")}<input name="serial" maxLength={100}/></label><label className="full">{t("Müşterinin bildirdiği arıza *")}<textarea name="fault" required minLength={5} maxLength={3000} placeholder={t("Sorunu müşterinizin anlattığı şekilde kaydedin.")}/></label></div></div>
- <div hidden={step !== 2} data-step="2"><h3>{t("Kabul bilgileri")}</h3><div className="form-grid"><label className="full">{t("Teslim alındığındaki fiziksel durum")}<textarea name="condition" placeholder={t("Çizik, kırık, darbe izleri...")}/></label><label className="full">{t("Teslim alınan aksesuarlar")}<input name="accessories" placeholder={t("Şarj kablosu, adaptör, kılıf...")}/></label><label>{t("Teslim alma tarihi *")}<input name="receivedAt" type="datetime-local" required defaultValue={new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16)}/></label><label>{t("Sorumlu teknisyen *")}<input name="technician" list="technicians" required placeholder={t("Teknisyen adı")}/><datalist id="technicians">{team.map(label => <option key={label} value={label}>{t(label)}</option>)}</datalist></label></div><div className="callout">{t("Kayıt sonrası güvenli takip bağlantısı ve QR kod oluşturulur. Fotoğrafları servis detayından ekleyebilirsiniz.")}</div></div>
+ <div hidden={step !== 2} data-step="2"><label>{t("Para birimi")}<select name="currency" defaultValue="TRY"><option value="EUR">Euro (€)</option><option value="TRY">{t("Türk lirası (₺)")}</option><option value="USD">{t("ABD doları ($)")}</option></select></label><h3>{t("Kabul bilgileri")}</h3><div className="form-grid"><label className="full">{t("Teslim alındığındaki fiziksel durum")}<textarea name="condition" placeholder={t("Çizik, kırık, darbe izleri...")}/></label><label className="full">{t("Teslim alınan aksesuarlar")}<input name="accessories" placeholder={t("Şarj kablosu, adaptör, kılıf...")}/></label><label>{t("Teslim alma tarihi *")}<input name="receivedAt" type="datetime-local" required defaultValue={new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16)}/></label><label>{t("Sorumlu teknisyen *")}<input name="technician" list="technicians" required placeholder={t("Teknisyen adı")}/><datalist id="technicians">{team.map(label => <option key={label} value={label}>{t(label)}</option>)}</datalist></label></div><div className="callout">{t("Kayıt sonrası güvenli takip bağlantısı ve QR kod oluşturulur. Fotoğrafları servis detayından ekleyebilirsiniz.")}</div></div>
  {error && <p role="alert" className="error-text">{t(error)}</p>}<div className="modal-footer"><button type="button" className="btn" onClick={() => step ? setStep(step - 1) : onClose()}>{step ? t('Geri') : t('Vazgeç')}</button><span>{step + 1} / 3</span>{step < 2 ? <button type="button" className="btn primary" onClick={next}>{t("Devam et")}</button> : <button className="btn primary" disabled={busy}>{busy ? null : null}{t("Servis kaydını oluştur")}</button>}</div></form></section></div>;
 }
 function PhotoUpload({ id, demo, onSaved }: {
@@ -304,71 +340,80 @@ function PhotoUpload({ id, demo, onSaved }: {
     onSaved: (r: RecordData) => void;
 }) {
     const { t } = useI18n();
+    const [preparing, setPreparing] = useState(false);
     const [progress, setProgress] = useState(0), [error, setError] = useState(''), [busy, setBusy] = useState(false), [previews, setPreviews] = useState<string[]>([]);
     useEffect(() => () => previews.forEach(URL.revokeObjectURL), [previews]);
     return <form className="detail-block" onSubmit={async (e) => {
             e.preventDefault();
-            setError('');
+            if (busy) return;
+            setError('');setProgress(0);
             if (demo) {
                 setError('Fotoğraf yüklemek için veritabanı ve fotoğraf depolama bağlantısını yapılandırın.');
                 return;
             }
-            const f = new FormData(e.currentTarget);
+            const form = e.currentTarget;
+            const f = new FormData(form);
             const files = f.getAll('files').filter(x => x instanceof File && x.size > 0) as File[];
             if (!files.length) {
                 setError('En az bir fotoğraf seçin.');
                 return;
             }
+            if(files.length>10){setError('Bir seferde en fazla 10 fotoğraf seçin.');return;}
             setBusy(true);
             try {
                 for (let i = 0; i < files.length; i++) {
+                    setPreparing(true);
+                    const prepared = await preparePhoto(files[i]);
+                    setPreparing(false);
                     const body = new FormData();
-                    body.set('file', files[i]);
+                    body.set('file', prepared);
                     body.set('phase', String(f.get('phase')));
                     body.set('visible', f.get('visible') === 'on' ? 'true' : 'false');
                     await new Promise<void>((resolve, reject) => {
                         const xhr = new XMLHttpRequest();
                         xhr.open('POST', '/api/v1/records/' + id + '/photos');
                         xhr.setRequestHeader('Accept-Language', clientLanguage());
+                        xhr.timeout=90000;
+                        xhr.ontimeout=()=>reject(new Error('Yükleme zaman aşımına uğradı. Tekrar deneyin.'));
                         xhr.upload.onprogress = ev => {
                             if (ev.lengthComputable)
                                 setProgress(Math.round((i + ev.loaded / ev.total) / files.length * 100));
                         };
                         xhr.onload = () => {
-                            try {
-                                const r = JSON.parse(xhr.responseText);
-                                if (xhr.status >= 200 && xhr.status < 300) {
-                                    onSaved(r);
-                                    resolve();
-                                }
-                                else
-                                    reject(new Error(r.errorKey || r.error));
-                            }
-                            catch {
-                                reject(new Error('Yükleme yanıtı alınamadı.'));
-                            }
+                            if(xhr.status<200 || xhr.status>=300){reject(new Error(uploadFailure(xhr.status,xhr.responseText)));return;}
+                            try {onSaved(JSON.parse(xhr.responseText));resolve();}
+                            catch {reject(new Error('Yükleme yanıtı alınamadı.'));}
                         };
                         xhr.onerror = () => reject(new Error('Bağlantı kesildi. Tekrar deneyin.'));
                         xhr.send(body);
                     });
                 }
-                setProgress(100);
+                setProgress(100);setPreviews([]);form.reset();
             }
             catch (e) {
                 setError((e as Error).message);
             }
             finally {
-                setBusy(false);
+                setBusy(false);setPreparing(false);
             }
-        }}><h3>{t("Fotoğraf ekle")}</h3><label>{t("Fotoğraflar · JPEG, PNG, WebP · en fazla 8 MB")}<input type="file" name="files" multiple accept="image/jpeg,image/png,image/webp" onChange={e => {
+        }}><h3>{t("Fotoğraf ekle")}</h3><label>{t("Fotoğraflar · en fazla 30 MB · büyük dosyalar otomatik küçültülür")}<input type="file" name="files" multiple disabled={busy} accept="image/jpeg,image/png,image/webp,image/heic,image/heif" onChange={e => {
             const files = Array.from(e.target.files || []);
-            setPreviews(files.filter(f => f.size <= 8 * 1024 * 1024).map(f => URL.createObjectURL(f)));
-            if (files.some(f => f.size > 8 * 1024 * 1024))
-                setError('8 MB sınırını aşan dosya var. Daha küçük bir fotoğraf seçin.');
-        }}/></label><div className="photo-grid">{previews.map(p => <img key={p} src={p} alt={t("Yükleme önizlemesi")}/>)}</div><label>{t("Aşama")}<select name="phase"><option value={"Kabul"}>{t("Kabul")}</option><option value={"Tamir \u00F6ncesi"}>{t("Tamir öncesi")}</option><option value={"Tamir sonras\u0131"}>{t("Tamir sonrası")}</option></select></label><label className="checkbox"><input type="checkbox" name="visible"/>{t("Müşteri takip sayfasında göster")}</label>{busy && <div><progress max={100} value={progress}/><span>{t('{progress}% yükleniyor', { progress })}</span></div>}{error && <p className="error-text" role="alert">{t(error)}</p>}<button className="btn primary" disabled={busy}>{busy ? t('Yükleniyor...') : t('Fotoğrafları yükle')}</button></form>;
+            setPreviews(files.filter(f => f.size <= 30 * 1024 * 1024).slice(0,10).map(f => URL.createObjectURL(f)));
+            if (files.some(f => f.size > 30 * 1024 * 1024))
+                setError('Fotoğraf en fazla 30 MB olabilir.');
+        }}/></label><div className="photo-grid">{previews.map(p => <img key={p} src={p} alt={t("Yükleme önizlemesi")}/>)}</div><label>{t("Aşama")}<select name="phase" disabled={busy}><option value={"Kabul"}>{t("Kabul")}</option><option value={"Tamir \u00F6ncesi"}>{t("Tamir öncesi")}</option><option value={"Tamir sonras\u0131"}>{t("Tamir sonrası")}</option></select></label><label className="checkbox"><input type="checkbox" name="visible" disabled={busy}/>{t("Müşteri takip sayfasında göster")}</label>{preparing && <p role="status">{t("Fotoğraf hazırlanıyor…")}</p>}{busy && <div><progress max={100} value={progress}/><span>{t('{progress}% yükleniyor', { progress })}</span></div>}{progress===100 && !busy && !error && <p role="status">{t("Fotoğraflar yüklendi.")}</p>}{error && <p className="error-text" role="alert">{t(error)}</p>}<button className="btn primary" disabled={busy}>{preparing ? t('Fotoğraf hazırlanıyor…') : busy ? t('Yükleniyor...') : t('Fotoğrafları yükle')}</button></form>;
 }
 function QuoteForm({ record, busy, submit }: {
     record: RecordData;
     busy: boolean;
     submit: (body: unknown) => void;
-}) { const { t, money } = useI18n(); const [parts, setParts] = useState([{ id: crypto.randomUUID(), name: '', amount: '' }]), [labor, setLabor] = useState(''); const total = parts.reduce((s, p) => s + Math.round(Number(p.amount || 0) * 100), 0) + Math.round(Number(labor || 0) * 100); return <form className="detail-block form-grid" onSubmit={e => { e.preventDefault(); const f = new FormData(e.currentTarget); submit({ diagnosis: f.get('diagnosis'), work: f.get('work'), parts: parts.filter(p => p.name).map(p => ({ name: p.name, amount: Math.round(Number(p.amount) * 100) })), labor: Math.round(Number(labor) * 100), eta: f.get('eta') }); }}><h3 className="full">{record.quotes.length ? t('Yeni teklif sürümü') : t('Fiyat teklifi oluştur')}</h3><label className="full">{t("Tespit edilen arıza")}<textarea name="diagnosis" required minLength={3} defaultValue={record.id.startsWith('sample-') ? t(record.fault) : record.fault}/></label><label className="full">{t("Yapılacak işlemler")}<textarea name="work" required minLength={3}/></label><div className="full"><h3>{t("Parçalar ve ücretleri")}</h3>{parts.map((p, i) => <div className="part-editor" key={p.id}><input placeholder={t("Parça adı")} aria-label={t('Parça {index} adı', { index: i + 1 })} value={p.name} onChange={e => setParts(parts.map(x => x.id === p.id ? { ...x, name: e.target.value } : x))}/><input placeholder={t("Tutar (₺)")} type="number" min="0" step="0.01" required={!!p.name} aria-label={t('Parça {index} tutarı', { index: i + 1 })} value={p.amount} onChange={e => setParts(parts.map(x => x.id === p.id ? { ...x, amount: e.target.value } : x))}/><button type="button" className="icon-btn" aria-label={t("Parçayı kaldır")} onClick={() => setParts(parts.filter(x => x.id !== p.id))}>{t("Kald\u0131r")}</button></div>)}<button type="button" className="text-btn" onClick={() => setParts([...parts, { id: crypto.randomUUID(), name: '', amount: '' }])}>{t("Parça ekle")}</button></div><label>{t("İşçilik (₺)")}<input type="number" value={labor} onChange={e => setLabor(e.target.value)} min="0" step="0.01" required/></label><label>{t("Tahmini teslim")}<input type="date" name="eta"/></label><div className="price-line total full"><span>{t("Teklif toplamı")}</span><strong>{money(total)}</strong></div><button disabled={busy} className="btn primary full">{t("Teklifi onaya sun")}</button></form>; }
+}) { const { t, money } = useI18n(); const [parts, setParts] = useState([{ id: crypto.randomUUID(), name: '', amount: '' }]), [labor, setLabor] = useState(''); const total = parts.reduce((s, p) => s + Math.round(Number(p.amount || 0) * 100), 0) + Math.round(Number(labor || 0) * 100); return <form className="detail-block form-grid" onSubmit={e => { e.preventDefault(); const f = new FormData(e.currentTarget); submit({ diagnosis: f.get('diagnosis'), work: f.get('work'), parts: parts.filter(p => p.name).map(p => ({ name: p.name, amount: Math.round(Number(p.amount) * 100) })), labor: Math.round(Number(labor) * 100), eta: f.get('eta') }); }}><h3 className="full">{record.quotes.length ? t('Yeni teklif sürümü') : t('Fiyat teklifi oluştur')}</h3><label className="full">{t("Tespit edilen arıza")}<textarea name="diagnosis" required minLength={3} defaultValue={record.id.startsWith('sample-') ? t(record.fault) : record.fault}/></label><label className="full">{t("Yapılacak işlemler")}<textarea name="work" required minLength={3}/></label><div className="full"><h3>{t("Parçalar ve ücretleri")}</h3>{parts.map((p, i) => <div className="part-editor" key={p.id}><input placeholder={t("Parça adı")} aria-label={t('Parça {index} adı', { index: i + 1 })} value={p.name} onChange={e => setParts(parts.map(x => x.id === p.id ? { ...x, name: e.target.value } : x))}/><input placeholder={t("Tutar") + " (" + (record.currency ?? "TRY") + ")"} type="number" min="0" step="0.01" required={!!p.name} aria-label={t('Parça {index} tutarı', { index: i + 1 })} value={p.amount} onChange={e => setParts(parts.map(x => x.id === p.id ? { ...x, amount: e.target.value } : x))}/><button type="button" className="icon-btn" aria-label={t("Parçayı kaldır")} onClick={() => setParts(parts.filter(x => x.id !== p.id))}>{t("Kald\u0131r")}</button></div>)}<button type="button" className="text-btn" onClick={() => setParts([...parts, { id: crypto.randomUUID(), name: '', amount: '' }])}>{t("Parça ekle")}</button></div><label>{t("İşçilik") + " (" + (record.currency ?? "TRY") + ")"}<input type="number" value={labor} onChange={e => setLabor(e.target.value)} min="0" step="0.01" required/></label><label>{t("Tahmini teslim")}<input type="date" name="eta"/></label><div className="price-line total full"><span>{t("Teklif toplamı")}</span><strong>{money(total, record.currency)}</strong></div><button disabled={busy} className="btn primary full">{t("Teklifi onaya sun")}</button></form>; }
+
+function StaffPasswordForm({staffId,onSaved}:{staffId:string;onSaved:(message:string)=>void}){
+ const {t}=useI18n();const [busy,setBusy]=useState(false);
+ return <details><summary>{t("Parola belirle")}</summary><form className="detail-block" onSubmit={async e=>{
+  e.preventDefault();if(busy)return;const form=e.currentTarget;const password=new FormData(form).get('password');setBusy(true);
+  try{await api('users/password','PATCH',{id:staffId,password});form.reset();onSaved('Parola güncellendi. Önceki oturumlar kapatıldı.');}
+  catch(error){onSaved((error as Error).message);}finally{setBusy(false);}
+ }}><label>{t("Yeni parola (en az 12 karakter)")}<input name="password" type="password" autoComplete="new-password" minLength={12} maxLength={200} required disabled={busy}/></label><button className="btn" disabled={busy}>{t("Parolayı kaydet")}</button></form></details>;
+}
