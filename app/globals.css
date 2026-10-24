@@ -113,3 +113,16 @@ h1{font-size:26px;letter-spacing:-.65px;font-weight:650}h2{font-weight:650;lette
 .record-detail-screen .photo-grid img{height:190px}
 .history-remove{display:block;margin-top:10px}
 @media(max-width:600px){.record-detail-screen .drawer-title{padding-top:20px}.record-detail-screen .drawer-links{flex-wrap:wrap}.record-detail-screen .photo-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.record-detail-screen .photo-grid img{height:135px}}
+
+/* Uploaded photo cards: separate controls and comfortable touch targets. */
+.record-detail-screen .photo-grid{gap:20px}
+.service-photo-card{min-width:0;border:1px solid var(--line);border-radius:10px;background:var(--surface);overflow:hidden}
+.service-photo-card>a{display:block;padding:10px 10px 0}
+.service-photo-meta{display:flex;flex-direction:column;align-items:flex-start;gap:12px;padding:12px}
+.service-photo-meta .checkbox{min-height:36px;font-size:12px}
+.service-photo-delete{min-height:44px;width:100%;justify-content:center;color:#b42318;border-color:#e4aba6;background:transparent}
+.service-photo-delete:hover{background:#b4231810}
+[data-theme="dark"] .service-photo-delete{color:#ffb4ab;border-color:#92544e}
+@media(max-width:420px){.record-detail-screen .photo-grid:has(.service-photo-card){grid-template-columns:1fr}}
+
+.quote-delete{width:auto;margin-top:16px;min-height:44px}

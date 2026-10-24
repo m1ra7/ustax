@@ -113,3 +113,13 @@ Parola içeren istekleri yalnızca HTTPS üzerinden gönderin. Bu uç noktalar n
 POST `/records` alanı `currency`: `EUR`, `TRY` veya `USD`; gönderilmezse `TRY`. Tutarlar seçilen para biriminin yüzde biri olarak tamsayı saklanır. Kur dönüşümü yoktur. Para birimi servis JSONB verisinde saklanır; ek migration gerekmez. GET `/records` ve GET `/track/{token}` para birimini taşır. Önceki para birimi bulunmayan kayıtlar TRY kabul edilir. Mevcut kayıtların para birimini değiştirme uç noktası yoktur.
 
 DELETE `/records/{id}/events/{eventId}` yalnızca yönetici: adım görünümden kaldırılır, özgün bilgi ve denetim izi saklanır. POST `/users` ilk parola için `password` (12–200 karakter) kabul eder. PATCH `/users/password` yönetici tarafından başka bir çalışan için `{id,password}` alır, mevcut oturumları iptal eder. İstemciye parolanın hash değeri dönmez.
+
+
+## Fotoğraf silme
+
+DELETE `/records/{recordId}/photos/{photoId}`: yönetici veya teknisyen oturumu gerekir, müşteri takip bağlantısıyla kullanılamaz. Fotoğraf yalnızca ilgili servisten kaldırılır. Kayıt değişikliği ve denetim izi atomiktir; çakışmada 409. Depolama silmesi sonradan yürütülür; geçici hatada özel JSONB kuyruğunda saklanır ve `warning` içeren güncel kayıt döner. Aynı DELETE isteği temizliği yeniden deneyebilir; `pnpm photos:cleanup` bekleyenleri işler. `photoDeletionQueue` müşteri izdüşümünde yer almaz.
+
+
+## Teklif silme
+
+DELETE `/records/{recordId}/quotes/{version}` yetkili çalışan içindir. Silinen teklif deletedAt/deletedBy ile denetim için saklanır. Teklif sürümü yeniden kullanılmaz; eski sürümler otomatik aktif olmaz. Bekleyen güncel teklif silinince incelemeye dönülür. Kod iptali ve audit aynı atomik sorgudadır. Aktif/teslim edilmiş tamirin güncel teklifinin silinmesi 409 döndürür. GET `/health` capabilities alanı `features.quoteDelete: true` döndürür.

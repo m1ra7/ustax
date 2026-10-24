@@ -1,3 +1,5 @@
+import {removeQuote,removeQuoteStatement} from '../../../../lib/quote-deletion';
+import {removeRecordPhoto,removePhotoStatement} from '../../../../lib/photo-deletion';
 import {hideHistoryEvent,hideHistoryStatement} from '../../../../lib/history';
 import {createStaffSchema,resetStaffPasswordSchema} from '../../../../lib/staff-input';
 import {passwordHash,verifyPassword} from '../../../../lib/password';
@@ -10,12 +12,12 @@ import {eq,and} from 'drizzle-orm';
 import {z,ZodError} from 'zod';
 import {staff,sameOrigin,rate,hash,randomToken,HttpError} from '../../../../lib/security';
 import {getRecord,createRecord,mutate,move,quote,event} from '../../../../lib/service';
-import {statuses,publicRecord,checkRole,type RecordData} from '../../../../lib/domain';
-import {uploadPhoto,downloadPhoto,mediaReady} from '../../../../lib/media';
+import {statuses,publicRecord,checkRole,activeQuote,type RecordData} from '../../../../lib/domain';
+import {uploadPhoto,downloadPhoto,mediaReady,deleteStoredPhoto} from '../../../../lib/media';
 export const dynamic='force-dynamic';
 function baseJson(data:unknown,status=200){return Response.json(data,{status,headers:{'Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff'}});}
 async function run(req:Request,ctx:{params:Promise<{path:string[]}>}){const language=requestLanguage(req.headers);const json=(data:unknown,status=200)=>{if(data&&typeof data==='object'&&!Array.isArray(data)){const d={...data} as Record<string,unknown>;for(const key of ['error','message','warning'])if(typeof d[key]==='string'){d[key+'Key']=d[key];d[key]=translate(language,d[key] as string);}return baseJson(d,status);}return baseJson(data,status);};try{const p=(await ctx.params).path;const method=req.method;const url=new URL(req.url);sameOrigin(req);
-if(p[0]==='health')return json({database:!!process.env.DATABASE_URL,photos:mediaReady(),email:!!(process.env.RESEND_API_KEY&&process.env.EMAIL_FROM),auth:'email-password',mode:process.env.DATABASE_URL?'live':'setup'});
+if(p[0]==='health')return json({database:!!process.env.DATABASE_URL,photos:mediaReady(),email:!!(process.env.RESEND_API_KEY&&process.env.EMAIL_FROM),auth:'email-password',features:{photoDelete:true,quoteDelete:true},release:'quotes-delete-v1',mode:process.env.DATABASE_URL?'live':'setup'});
 if(!process.env.DATABASE_URL)throw new HttpError(503,'Kurulum gerekli: PostgreSQL bağlantısı henüz eklenmedi. Örnek görünüm gerçek müşteri verisi içermez.');
 if(p[0]==='auth'){
 const cookie=(value:string,maxAge:number)=>`ustax-session=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${process.env.NODE_ENV==='production'?'; Secure':''}`;
@@ -29,11 +31,11 @@ if(p[0]==='track'){
  await rate(req,'track',80);const row=await getRecord(p[1],true);const r=row.data;
  if(method==='GET')return json(publicRecord(r));
  if(p[2]==='code'&&method==='POST'){
- await rate(req,'code:'+r.id,5);const q=r.quotes.at(-1);if(!q||q.decision!=='pending')throw new HttpError(409,'Onay bekleyen teklif bulunmuyor.');if(!r.email)throw new HttpError(409,'Servis çalışanı doğrulama için e-posta adresinizi eklemelidir.');if(!process.env.RESEND_API_KEY||!process.env.EMAIL_FROM)throw new HttpError(503,'E-posta doğrulama altyapısı yapılandırılmadı. Servisinizle iletişime geçin.');
+ await rate(req,'code:'+r.id,5);const q=activeQuote(r);if(!q||q.decision!=='pending')throw new HttpError(409,'Onay bekleyen teklif bulunmuyor.');if(!r.email)throw new HttpError(409,'Servis çalışanı doğrulama için e-posta adresinizi eklemelidir.');if(!process.env.RESEND_API_KEY||!process.env.EMAIL_FROM)throw new HttpError(503,'E-posta doğrulama altyapısı yapılandırılmadı. Servisinizle iletişime geçin.');
  const array=new Uint32Array(1);let n;do{crypto.getRandomValues(array);n=array[0];}while(n>=4294000000);const code=String(n%1000000).padStart(6,'0');const id=crypto.randomUUID();await db().insert(codes).values({id,recordId:r.id,version:q.version,hash:await hash(id+':'+code),expiresAt:new Date(Date.now()+10*60000)});
  const sent=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:`Bearer ${process.env.RESEND_API_KEY}`,'Content-Type':'application/json','Idempotency-Key':id},body:JSON.stringify({from:process.env.EMAIL_FROM,to:[r.email],...verificationEmail(language,r.number,q.version,code)})});if(!sent.ok){await db().delete(codes).where(eq(codes.id,id));throw new HttpError(502,'E-posta gönderilemedi. Tekrar deneyin.');}return json({challengeId:id,message:'Doğrulama kodu kayıtlı e-posta adresinize gönderildi.'});}
  if(p[2]==='decision'&&method==='POST'){
- await rate(req,'decision:'+r.id,10);const b=z.object({challengeId:z.string().uuid(),code:z.string().regex(/^\d{6}$/),decision:z.enum(['approved','rejected']),version:z.number().int().positive()}).parse(await req.json());const q=r.quotes.at(-1);if(q?.version!==b.version)throw new HttpError(409,'Teklif güncellendi. Sayfayı yenileyin.');if(q.decision!=='pending'){if(q.decision===b.decision)return json({ok:true,alreadyRecorded:true});throw new HttpError(409,'Bu teklif için daha önce farklı bir karar kaydedildi.');}
+ await rate(req,'decision:'+r.id,10);const b=z.object({challengeId:z.string().uuid(),code:z.string().regex(/^\d{6}$/),decision:z.enum(['approved','rejected']),version:z.number().int().positive()}).parse(await req.json());const q=activeQuote(r);if(q?.version!==b.version)throw new HttpError(409,'Teklif güncellendi. Sayfayı yenileyin.');if(q.decision!=='pending'){if(q.decision===b.decision)return json({ok:true,alreadyRecorded:true});throw new HttpError(409,'Bu teklif için daha önce farklı bir karar kaydedildi.');}
  const sql=sqlClient();const attempts=await sql`UPDATE verification_codes SET attempts=attempts+1 WHERE id=${b.challengeId} AND record_id=${r.id} AND version=${b.version} AND used=false AND expires_at>now() AND attempts<5 RETURNING hash`;if(!attempts.length||attempts[0].hash!==await hash(b.challengeId+':'+b.code))throw new HttpError(400,'Kod geçersiz, süresi dolmuş veya deneme sınırına ulaşılmış.');
  q.decision=b.decision;q.decidedAt=new Date().toISOString();r.status=b.decision==='rejected'?'Teklif reddedildi':r.status;r.updatedAt=q.decidedAt;event(r,'Müşteri',`Teklif v${b.version} ${b.decision==='approved'?'onaylandı':'reddedildi'}.`);
  const statement=decisionStatement(b.challengeId,r.id,row.revision,r);const changed=await sql.query(statement.text,statement.params);
@@ -76,6 +78,37 @@ if(p[0]==='records'){
  if(!changed.length)throw new HttpError(409,'Kayıt başka bir çalışan tarafından değiştirildi. Yenileyip tekrar deneyin.');
  return json(data);}
  if(p[2]==='rotate'&&method==='POST'){if(u.role!=='admin')throw new HttpError(403,'Yönetici yetkisi gerekiyor.');const token=randomToken();const row=await getRecord(id);event(row.data,u.name,'Takip bağlantısı yenilendi.',true);const changed=await db().update(records).set({tokenHash:await hash(token),data:row.data,revision:row.revision+1}).where(and(eq(records.id,id),eq(records.revision,row.revision))).returning();if(!changed.length)throw new HttpError(409,'Kayıt değişti. Tekrar deneyin.');return json({token});}
+ if(p[2]==='quotes'&&p.length===4&&method==='DELETE'){
+ const version=z.coerce.number().int().positive().safe().parse(p[3]);const row=await getRecord(id);
+ const existing=row.data.quotes.find(q=>q.version===version);
+ if(existing?.deletedAt)return json(row.data);
+ const data=removeQuote(row.data,version,u.id,u.name);
+ const statement=removeQuoteStatement(id,row.revision,data,u.id,version,crypto.randomUUID());
+ const changed=await sqlClient().query(statement.text,statement.params);
+ if(!changed.length)throw new HttpError(409,'Kayıt başka bir çalışan tarafından değiştirildi. Yenileyip tekrar deneyin.');
+ return json(data);
+ }
+ if(p[2]==='photos'&&p.length===4&&method==='DELETE'){
+ const photoId=z.string().min(1).max(200).parse(p[3]);const row=await getRecord(id);
+ let data=row.data;
+ if(data.photos.some(photo=>photo.id===photoId)){
+  data=removeRecordPhoto(data,photoId,u.name);
+  const statement=removePhotoStatement(id,row.revision,data,u.id,photoId,crypto.randomUUID());
+  const changed=await sqlClient().query(statement.text,statement.params);
+  if(!changed.length)throw new HttpError(409,'Kayıt başka bir çalışan tarafından değiştirildi. Yenileyip tekrar deneyin.');
+ }
+ const pending=data.photoDeletionQueue?.find(photo=>photo.id===photoId);
+ if(pending){
+  try {
+   await deleteStoredPhoto(pending.publicId);
+   data=await mutate(id,u.name,r=>{r.photoDeletionQueue=(r.photoDeletionQueue??[]).filter(photo=>photo.id!==photoId);});
+  }catch(error){
+   console.error('storage_delete_failure',{name:error instanceof Error?error.name:'unknown'});
+   return json({...data,warning:'Fotoğraf kayıttan kaldırıldı. Depolama temizliği bekliyor.'});
+  }
+ }
+ return json(data);
+ }
  if(p[2]==='photos'&&method==='POST'){await getRecord(id);const f=await req.formData();const file=f.get('file');if(!(file instanceof File))throw new HttpError(400,'Fotoğraf seçin.');const phase=z.enum(['Kabul','Tamir öncesi','Tamir sonrası']).parse(f.get('phase'));const photo=await uploadPhoto(file,id);return json(await mutate(id,u.name,r=>{r.photos.push({...photo,phase,visible:f.get('visible')==='true'});event(r,u.name,'Fotoğraf eklendi.',true);}));}
  if(p[2]==='photos'&&method==='PATCH'){const b=z.object({id:z.string(),visible:z.boolean()}).parse(await req.json());return json(await mutate(id,u.name,r=>{const photo=r.photos.find(p=>p.id===b.id);if(!photo)throw new HttpError(404,'Fotoğraf yok.');photo.visible=b.visible;event(r,u.name,'Fotoğraf görünürlüğü değiştirildi.',true);}));}
  if(method==='PATCH'){const b=z.record(z.unknown()).parse(await req.json());return json(await mutate(id,u.name,r=>{
@@ -83,7 +116,7 @@ if(p[0]==='records'){
  else if(p[2]==='notes'){const v=z.object({text:z.string().min(1).max(5000),internal:z.boolean()}).parse(b);event(r,u.name,v.text,v.internal);}
  else if(p[2]==='quote')quote(r,b,u.name);
  else if(p[2]==='email'){r.email=z.string().email().parse(b.email);event(r,u.name,'Müşteri e-posta adresi güncellendi.',true);}
- else if(p[2]==='complete'){const v=z.object({work:z.string().min(3).max(3000),parts:z.string().max(2000),fee:z.number().int().min(0),warranty:z.string().max(3000)}).parse(b);if(r.status!=='Tamir ediliyor'||r.quotes.at(-1)?.decision!=='approved'||v.fee!==r.quotes.at(-1)?.total)throw new HttpError(409,'Tamir ve onaylı teklif tutarı kontrol edilmeli. Fiyat değişiyorsa yeni teklif hazırlayın.');r.completion={...v,completedAt:new Date().toISOString()};move(r,'Teslime hazır',u.name);}
+ else if(p[2]==='complete'){const v=z.object({work:z.string().min(3).max(3000),parts:z.string().max(2000),fee:z.number().int().min(0),warranty:z.string().max(3000)}).parse(b);if(r.status!=='Tamir ediliyor'||activeQuote(r)?.decision!=='approved'||v.fee!==activeQuote(r)?.total)throw new HttpError(409,'Tamir ve onaylı teklif tutarı kontrol edilmeli. Fiyat değişiyorsa yeni teklif hazırlayın.');r.completion={...v,completedAt:new Date().toISOString()};move(r,'Teslime hazır',u.name);}
  else if(p[2]==='deliver'){if(r.status!=='Teslime hazır'||!r.completion)throw new HttpError(409,'Cihaz henüz teslime hazır değil.');r.completion.deliveredAt=new Date().toISOString();r.completion.deliveryNote=z.string().max(2000).parse(b.note);move(r,'Teslim edildi',u.name);}
  else throw new HttpError(404,'Uç nokta bulunamadı.');}));}}
 throw new HttpError(404,'Uç nokta bulunamadı.');
